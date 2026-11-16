@@ -129,10 +129,3 @@ Use this to redirect to a different page.
 
 **It looks like...**  
 N/A
-
-## KI Studio (iPhone-Web-App)
-
-Im Ordner `docs/` liegt eine eigenständige Web-App zum Erstellen von KI-Bildern und -Videos (kein Build nötig).
-
-Veröffentlichen über GitHub Pages: **Settings → Pages → Deploy from a branch**, Branch auswählen, Ordner **/docs**.
-Danach die Seite in Safari öffnen und über **Teilen → Zum Home-Bildschirm** installieren.
