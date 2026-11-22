@@ -2,9 +2,12 @@
 """
 doorway_stuck.py - Slapstick-Pixel-Art-Animation: Figur steckt im Tuerrahmen fest.
 
-Rendert eine kurze 16-Bit-artige Animation pixelgenau mit Pillow in einer kleinen
-Basisaufloesung (320x180), skaliert sie per Nearest-Neighbor hoch und exportiert:
+Die Figur ist ein Pixel-Sprite (assets/heroine.png, extrahiert mit extract_sprite.py).
+Das Skript zerlegt das Sprite in horizontale Teile (Kopf, Oberkoerper, Becken, Beine)
+und animiert diese pixelgenau (Verschieben, Scheren, horizontales Stauchen/Dehnen).
+Gerendert wird in kleiner Basisaufloesung (256x144), hochskaliert per Nearest-Neighbor.
 
+Exporte:
   * MP4  (ueber ffmpeg, Standard)
   * GIF  (optional, --gif)
   * Sprite-Sheet PNG (optional, --sheet)
@@ -12,15 +15,10 @@ Basisaufloesung (320x180), skaliert sie per Nearest-Neighbor hoch und exportiert
 
 Die Ausgabe ist deterministisch: gleiche Argumente (inkl. --seed) => gleiche Bilder.
 
-Schnellstart:
-    python doorway_stuck.py                       # -> out/doorway_stuck.mp4
-    python doorway_stuck.py --gif --sheet         # zusaetzlich GIF + Sprite-Sheet
-    python doorway_stuck.py --fps 15 --speed 0.8  # 15 FPS, 25 % langsamer
-
 Anpassen: Alle Stellschrauben stehen gesammelt in den Abschnitten
-  1) PALETTE        - Farben / Schattierungsrampen
-  2) LAYOUT         - Raum- und Tuergeometrie
-  3) PROPORTIONS    - Koerperproportionen der Figur
+  1) PALETTE        - Farben der Umgebung und Effekte
+  2) LAYOUT         - Aufloesung, Raum- und Tuergeometrie
+  3) SPRITE         - Sprite-Datei, Aufteilung in Koerperteile, Proportionen
   4) PHASES         - Ablauf, Dauer und Bewegungsamplituden der Animation
 """
 
@@ -37,168 +35,97 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+HERE = Path(__file__).resolve().parent
+
 # =============================================================================
-# 1) PALETTE
+# 1) PALETTE (Umgebung + Effekte; die Figur bringt ihre eigene Palette mit)
 # -----------------------------------------------------------------------------
-# Begrenzte Palette im 16-Bit-Stil. Jede "Rampe" hat drei Stufen:
-#   (dunkel/Schatten, Grundton, Licht/Glanz)
-# Wer Farben aendern will, aendert nur hier.
+# Rampen: (dunkel/Schatten, Grundton, Licht)
 # =============================================================================
-OUTLINE = (34, 24, 38)          # Einheitliche dunkle Outline fuer alle Figurenteile
+OUTLINE = (24, 20, 26)
 WHITE = (250, 248, 240)
-
-SKIN = ((196, 118, 90), (236, 168, 128), (252, 206, 168))
-HAIR = ((92, 38, 30), (150, 64, 40), (204, 106, 60))
-SHIRT = ((38, 86, 118), (58, 136, 168), (126, 198, 212))
-PANTS = ((66, 48, 88), (102, 76, 132), (146, 118, 176))
-SHOES = ((40, 30, 32), (70, 52, 50), (104, 80, 72))
-EYE = (40, 30, 60)
-BLUSH = (232, 120, 120)
-
-WOOD = ((92, 54, 28), (138, 86, 42), (186, 128, 70))
-WALLPAPER = ((150, 132, 108), (196, 180, 148), (214, 200, 170))
-WAINSCOT = ((96, 64, 46), (124, 86, 60), (152, 110, 78))
-FLOOR = ((78, 52, 38), (110, 76, 54), (136, 98, 68))
-BACKROOM = ((22, 18, 32), (40, 34, 54), (60, 54, 78))
+WOOD = ((84, 50, 28), (132, 82, 42), (180, 124, 68))
+WALLPAPER = ((150, 132, 108), (192, 176, 146), (210, 196, 166))
+WAINSCOT = ((90, 60, 44), (118, 82, 58), (146, 106, 76))
+FLOOR = ((72, 48, 36), (104, 72, 52), (130, 94, 66))
+# Nebenzimmer hinter der Tuer bewusst HELL, damit die dunkle Figur sich gut abhebt
+BACKROOM = ((150, 140, 130), (184, 174, 158), (214, 204, 184))
 LAMP = ((210, 170, 80), (250, 222, 140), (255, 246, 210))
-
+ACCENT = (196, 180, 44)        # Gelb der Figur, fuer Effekte wiederverwendet
 SWEAT = (160, 214, 255)
 DUST = (206, 194, 170)
 
 # =============================================================================
-# 2) LAYOUT (Basisaufloesung, alle Werte in "echten" Pixeln vor dem Hochskalieren)
+# 2) LAYOUT (alle Werte in Basis-Pixeln vor dem Hochskalieren)
 # =============================================================================
-BASE_W, BASE_H = 320, 180
-FLOOR_Y = 150                  # Oberkante des Bodens
-DOOR_CX = 160                  # Mittelpunkt der Tuer
-DOOR_HALF_OPENING = 23         # halbe lichte Breite der Tueroeffnung (schmal!)
-JAMB_W = 8                     # Breite der Tuerpfosten
-DOOR_TOP = 38                  # Oberkante der Tueroeffnung
-LINTEL_H = 8                   # Hoehe des Tuersturzes
+BASE_W, BASE_H = 256, 144      # x5 => 1280x720
+FLOOR_Y = 126                  # Oberkante des Bodens (Fuesse stehen hier)
+DOOR_CX = 128                  # Mittelpunkt der Tuer
+DOOR_HALF_OPENING = 9          # halbe lichte Breite der Tueroeffnung (schmaler als das Becken!)
+JAMB_W = 4                     # Breite der Tuerpfosten
+DOOR_TOP = 48                  # Oberkante der Tueroeffnung
+LINTEL_H = 5                   # Hoehe des Tuersturzes
 
 # =============================================================================
-# 3) PROPORTIONS (Figur in Frontansicht, Werte = Radien/Offsets in Pixeln)
+# 3) SPRITE
 # -----------------------------------------------------------------------------
-# Ueberzeichnete Cartoon-Proportionen. HIP_RX > DOOR_HALF_OPENING sorgt dafuer,
-# dass das Becken seitlich hinter den Pfosten "eingeklemmt" ist.
+# Zeilenbereiche (inklusive) der Koerperteile im Sprite. Die Bereiche ueberlappen
+# absichtlich um 1-2 Zeilen: Wenn sich ein Teil verschiebt, entsteht keine Luecke.
+# Zeichenreihenfolge: Beine -> Becken -> Tuerpfosten -> Oberkoerper -> Kopf.
 # =============================================================================
-HIP_Y = 112                    # Mittelpunkt Becken/Hueften
-HIP_RX, HIP_RY = 31, 13        # Becken: halbe Breite / halbe Hoehe
-WAIST_Y, WAIST_RX, WAIST_RY = 100, 12, 8
-TRUNK_Y, TRUNK_RX, TRUNK_RY = 89, 15, 13
-CHEST_Y, CHEST_DX, CHEST_RX, CHEST_RY = 88, 7, 10, 8   # zwei Ovale, Abstand +-CHEST_DX
-SHOULDER_Y, SHOULDER_DX = 79, 16
-HEAD_Y, HEAD_RX, HEAD_RY = 62, 10, 11
-ARM_W = 4                      # Armdicke (ohne Outline)
-HAND_R = 3
+SPRITE_PATH = HERE / "assets" / "heroine.png"
+PART_HEAD = (0, 20)            # Helm/Kopf
+PART_TORSO = (18, 41)          # Jacke inkl. Arme
+PART_HIPS = (39, 53)           # Becken/Oberschenkel (wird im Tuerrahmen eingeklemmt)
+PART_LEGS = (50, 69)           # Unterschenkel/Stiefel
+SPRITE_PIVOT_X = 13.0          # horizontale Mitte der Figur im Sprite (fuer Stauchen/Platzieren)
+
+# Cartoon-Uebertreibung: Becken wird zusaetzlich verbreitert. Das Profil ist eine
+# weiche "Beule" ueber die Beckenzeilen (Mitte = HIP_BULGE_ROW).
+HIP_WIDEN = 1.6                # 1.0 = Original-Sprite
+HIP_BULGE_ROW = 46             # Sprite-Zeile mit der breitesten Stelle
 
 # =============================================================================
 # 4) PHASES (Ablauf)
 # -----------------------------------------------------------------------------
-# (Name, Dauer in Sekunden). Mit --speed werden alle Dauern gemeinsam skaliert.
-# Standard ~4,8 s. Die eigentliche Pose je Phase steht in pose_at().
+# (Name, Dauer in Sekunden). --speed skaliert alle Dauern gemeinsam. Standard ~4,8 s.
+# Die Pose je Phase steht in pose_at().
 # =============================================================================
 PHASES = [
-    ("idle", 0.70),       # Feststecken, schaut verdutzt
-    ("grip", 0.50),       # greift die Pfosten
-    ("strain", 1.50),     # Kraftanstrengung: zieht, drueckt, wackelt
-    ("slip", 0.35),       # ruckt ein kleines Stueck vor
+    ("idle", 0.70),       # Feststecken, verdutzt ("?")
+    ("grip", 0.50),       # ansetzen: Oberkoerper geht kurz zurueck, holt Schwung
+    ("strain", 1.50),     # Kraftanstrengung: ziehen, druecken, wackeln
+    ("slip", 0.35),       # ruckt ein kleines Stueck vor ("!")
     ("snap", 0.75),       # federt zurueck (gedaempfte Schwingung)
-    ("exhausted", 1.00),  # Erschoepfung, Schnaufen
+    ("exhausted", 1.00),  # Erschoepfung, Schnaufen ("~")
 ]
 
-# Bewegungsamplituden (werden zusaetzlich mit --amplitude multipliziert)
-WIGGLE_PX = 3.0        # seitliches Wackeln des Oberkoerpers in strain
-WIGGLE_CYCLES = 3.0    # Anzahl Wackel-Zyklen in strain
-SLIP_PX = 4.0          # wie weit sie beim Vorrutschen kommt
-HIP_SQUEEZE = 0.12     # Anteil, um den die Hueften beim Vorrutschen zusammengedrueckt werden
+# Bewegungsamplituden (zusaetzlich mit --amplitude multipliziert)
+WIGGLE_PX = 3.0        # seitliches Wackeln des Oberkoerpers (Pixel an der Schulter)
+WIGGLE_CYCLES = 3.0    # Wackel-Zyklen in "strain"
+SLIP_PX = 4.0          # wie weit sie beim Vorrutschen nach vorne kommt
+HIP_SQUEEZE = 0.14     # wie stark das Becken beim Vorrutschen zusammengedrueckt wird
+HIP_BOUNCE = 0.10      # wie stark das Becken beim Zurueckfedern ausbeult
 SHAKE_PX = 1           # Zittern von Tuerrahmen/Figur bei Kraftanstrengung
 
 
 # =============================================================================
-# Zeichen-Helfer
+# Hilfsfunktionen
 # =============================================================================
 def lerp(a: float, b: float, u: float) -> float:
     return a + (b - a) * u
 
 
+def clamp01(u: float) -> float:
+    return max(0.0, min(1.0, u))
+
+
 def ease_in_out(u: float) -> float:
-    return 0.5 - 0.5 * math.cos(math.pi * max(0.0, min(1.0, u)))
+    return 0.5 - 0.5 * math.cos(math.pi * clamp01(u))
 
 
 def ease_out(u: float) -> float:
-    u = max(0.0, min(1.0, u))
-    return 1 - (1 - u) ** 3
-
-
-def shaded_oval(d: ImageDraw.ImageDraw, cx: float, cy: float, rx: float, ry: float, ramp) -> None:
-    """Oval mit 1px-Outline und klassischem 3-Stufen-Retro-Shading.
-
-    Schatten unten rechts, Glanzlicht oben links (Licht kommt von oben links).
-    """
-    cx, cy, rx, ry = round(cx), round(cy), max(1, round(rx)), max(1, round(ry))
-    dark, mid, light = ramp
-    d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=OUTLINE)
-    if rx < 2 or ry < 2:
-        return
-    d.ellipse([cx - rx + 1, cy - ry + 1, cx + rx - 1, cy + ry - 1], fill=dark)
-    # Grundton leicht nach oben links versetzt -> Schattenkante unten rechts
-    d.ellipse([cx - rx + 1, cy - ry + 1, cx + rx - 2, cy + ry - 2], fill=mid)
-    # Glanzlicht
-    hx, hy = cx - rx * 0.35, cy - ry * 0.4
-    hrx, hry = max(1, rx * 0.3), max(1, ry * 0.25)
-    d.ellipse([round(hx - hrx), round(hy - hry), round(hx + hrx), round(hy + hry)], fill=light)
-
-
-def shaded_blob(d: ImageDraw.ImageDraw, ovals, ramp) -> None:
-    """Mehrere Ovale als EINE Form mit gemeinsamer Aussen-Outline.
-
-    Erst alle Outlines, dann alle Fuellungen -> keine Outline-Linien im Inneren
-    (wichtig fuer zusammengesetzte Koerperteile wie den Oberkoerper).
-    ovals = [(cx, cy, rx, ry), ...]
-    """
-    ovals = [(round(cx), round(cy), max(2, round(rx)), max(2, round(ry))) for cx, cy, rx, ry in ovals]
-    dark, mid, light = ramp
-    for cx, cy, rx, ry in ovals:
-        d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=OUTLINE)
-    for cx, cy, rx, ry in ovals:
-        d.ellipse([cx - rx + 1, cy - ry + 1, cx + rx - 1, cy + ry - 1], fill=dark)
-    for cx, cy, rx, ry in ovals:
-        d.ellipse([cx - rx + 1, cy - ry + 1, cx + rx - 2, cy + ry - 2], fill=mid)
-    for cx, cy, rx, ry in ovals:
-        hx, hy = cx - rx * 0.35, cy - ry * 0.4
-        hrx, hry = max(1, rx * 0.3), max(1, ry * 0.25)
-        d.ellipse([round(hx - hrx), round(hy - hry), round(hx + hrx), round(hy + hry)], fill=light)
-
-
-def thick_segment(d: ImageDraw.ImageDraw, p0, p1, width: int, color) -> None:
-    """Gliedmassen-Segment mit Outline (Outline-Linie, darauf Fuelllinie, runde Gelenke)."""
-    p0 = (round(p0[0]), round(p0[1]))
-    p1 = (round(p1[0]), round(p1[1]))
-    ow = width + 2
-    d.line([p0, p1], fill=OUTLINE, width=ow)
-    for p in (p0, p1):
-        r = ow // 2
-        d.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=OUTLINE)
-    d.line([p0, p1], fill=color, width=width)
-    for p in (p0, p1):
-        r = width // 2
-        d.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=color)
-
-
-# Mini-Pixelglyphen fuer Effekt-Blasen (1 = Pixel gesetzt)
-GLYPHS = {
-    "!": ["010", "010", "010", "000", "010"],
-    "?": ["111", "001", "011", "000", "010"],
-    "~": ["00000", "01001", "10110", "00000", "00000"],
-}
-
-
-def draw_glyph(d: ImageDraw.ImageDraw, x: int, y: int, ch: str, color) -> None:
-    for j, row in enumerate(GLYPHS[ch]):
-        for i, c in enumerate(row):
-            if c == "1":
-                d.point((x + i, y + j), fill=color)
+    return 1 - (1 - clamp01(u)) ** 3
 
 
 def dither_rect(d: ImageDraw.ImageDraw, box, color, every: int = 2) -> None:
@@ -209,95 +136,174 @@ def dither_rect(d: ImageDraw.ImageDraw, box, color, every: int = 2) -> None:
             d.point((x, y), fill=color)
 
 
+def shaded_oval(d, cx, cy, rx, ry, ramp) -> None:
+    """Kleines Oval mit Outline + 3-Stufen-Shading (fuer Lampen/Deko)."""
+    cx, cy, rx, ry = round(cx), round(cy), round(rx), round(ry)
+    d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=OUTLINE)
+    d.ellipse([cx - rx + 1, cy - ry + 1, cx + rx - 1, cy + ry - 1], fill=ramp[0])
+    d.ellipse([cx - rx + 1, cy - ry + 1, cx + rx - 2, cy + ry - 2], fill=ramp[1])
+    d.point((cx - 1, cy - 1), fill=ramp[2])
+
+
+# Mini-Pixelglyphen fuer Effekt-Blasen (1 = Pixel gesetzt)
+GLYPHS = {
+    "!": ["010", "010", "010", "000", "010"],
+    "?": ["111", "001", "011", "000", "010"],
+    "~": ["00000", "01001", "10110", "00000", "00000"],
+}
+
+
+def draw_glyph(d, x: int, y: int, ch: str, color) -> None:
+    for j, row in enumerate(GLYPHS[ch]):
+        for i, c in enumerate(row):
+            if c == "1":
+                d.point((x + i, y + j), fill=color)
+
+
 # =============================================================================
-# Hintergrund (statisch, wird einmal gerendert und je Frame kopiert)
+# Hintergrund (statisch, einmal gerendert und je Frame kopiert)
 # =============================================================================
 def render_background() -> Image.Image:
     img = Image.new("RGB", (BASE_W, BASE_H), WALLPAPER[1])
     d = ImageDraw.Draw(img)
+    wainscot_top = FLOOR_Y - 26
 
     # Tapete: vertikale Streifen + kleines Rautenmuster
-    for x in range(0, BASE_W, 10):
-        d.rectangle([x, 0, x + 3, FLOOR_Y], fill=WALLPAPER[2])
-    for y in range(12, 116, 12):
-        for x in range(5 + (y // 12 % 2) * 5, BASE_W, 10):
+    for x in range(0, BASE_W, 8):
+        d.rectangle([x, 0, x + 2, FLOOR_Y], fill=WALLPAPER[2])
+    for y in range(10, wainscot_top - 4, 10):
+        for x in range(4 + (y // 10 % 2) * 4, BASE_W, 8):
             d.point((x, y), fill=WALLPAPER[0])
             d.point((x - 1, y + 1), fill=WALLPAPER[0])
             d.point((x + 1, y + 1), fill=WALLPAPER[0])
             d.point((x, y + 2), fill=WALLPAPER[0])
 
     # Deckenleiste
-    d.rectangle([0, 0, BASE_W, 5], fill=WOOD[0])
-    d.line([0, 6, BASE_W, 6], fill=OUTLINE)
+    d.rectangle([0, 0, BASE_W, 4], fill=WOOD[0])
+    d.line([0, 5, BASE_W, 5], fill=OUTLINE)
 
-    # Wandvertaefelung (Wainscot) unten
-    d.rectangle([0, 118, BASE_W, FLOOR_Y], fill=WAINSCOT[1])
-    d.rectangle([0, 118, BASE_W, 121], fill=WAINSCOT[2])
-    d.line([0, 122, BASE_W, 122], fill=WAINSCOT[0])
-    for x in range(6, BASE_W, 28):
-        d.rectangle([x, 127, x + 20, FLOOR_Y - 5], outline=WAINSCOT[0])
-        d.line([x + 1, 128, x + 19, 128], fill=WAINSCOT[2])
+    # Wandvertaefelung
+    d.rectangle([0, wainscot_top, BASE_W, FLOOR_Y], fill=WAINSCOT[1])
+    d.rectangle([0, wainscot_top, BASE_W, wainscot_top + 2], fill=WAINSCOT[2])
+    d.line([0, wainscot_top + 3, BASE_W, wainscot_top + 3], fill=WAINSCOT[0])
+    for x in range(5, BASE_W, 22):
+        d.rectangle([x, wainscot_top + 7, x + 15, FLOOR_Y - 4], outline=WAINSCOT[0])
+        d.line([x + 1, wainscot_top + 8, x + 14, wainscot_top + 8], fill=WAINSCOT[2])
 
-    # Wandlampen links/rechts mit gedithertem Lichtschein
-    for lx in (58, 262):
-        for rad, col in ((26, WALLPAPER[2]), (16, LAMP[2])):
-            for y in range(50 - rad, 50 + rad):
+    # Wandlampen mit gedithertem Lichtschein
+    for lx in (52, 204):
+        ly = 44
+        for rad, col in ((22, WALLPAPER[2]), (13, LAMP[2])):
+            for y in range(ly - rad, ly + rad):
                 for x in range(lx - rad, lx + rad):
-                    if (x - lx) ** 2 + (y - 50) ** 2 < rad * rad and (x + y) % 2 == 0:
+                    if (x - lx) ** 2 + (y - ly) ** 2 < rad * rad and (x + y) % 2 == 0:
                         d.point((x, y), fill=col)
-        d.rectangle([lx - 2, 52, lx + 2, 60], fill=WOOD[0], outline=OUTLINE)
-        shaded_oval(d, lx, 47, 6, 6, LAMP)
+        d.rectangle([lx - 2, ly + 2, lx + 2, ly + 9], fill=WOOD[0], outline=OUTLINE)
+        shaded_oval(d, lx, ly - 2, 5, 5, LAMP)
 
-    # Bilderrahmen an der Wand (Deko)
-    d.rectangle([92, 70, 118, 92], fill=WOOD[1], outline=OUTLINE)
-    d.rectangle([95, 73, 115, 89], fill=(120, 170, 150))
-    d.polygon([(95, 89), (102, 79), (108, 86), (111, 82), (115, 89)], fill=(70, 120, 90))
+    # Bilderrahmen (Deko)
+    d.rectangle([76, 58, 98, 76], fill=WOOD[1], outline=OUTLINE)
+    d.rectangle([79, 61, 95, 73], fill=(120, 170, 150))
+    d.polygon([(79, 73), (85, 65), (90, 70), (92, 67), (95, 73)], fill=(70, 120, 90))
 
-    # Boden: Dielen mit versetzten Fugen, nach vorne dunkler (gedithert)
+    # Boden: Dielen mit versetzten Fugen, nach vorne dunkler
     d.rectangle([0, FLOOR_Y, BASE_W, BASE_H], fill=FLOOR[1])
     d.line([0, FLOOR_Y, BASE_W, FLOOR_Y], fill=OUTLINE)
-    for i, y in enumerate(range(FLOOR_Y + 6, BASE_H, 7)):
+    for i, y in enumerate(range(FLOOR_Y + 5, BASE_H, 6)):
         d.line([0, y, BASE_W, y], fill=FLOOR[0])
-        for x in range((i * 23) % 47, BASE_W, 47):
-            d.line([x, y - 6, x, y - 1], fill=FLOOR[0])
-    dither_rect(d, (0, 168, BASE_W, BASE_H), FLOOR[0])
+        for x in range((i * 19) % 41, BASE_W, 41):
+            d.line([x, y - 5, x, y - 1], fill=FLOOR[0])
+    dither_rect(d, (0, BASE_H - 6, BASE_W, BASE_H), FLOOR[0])
 
-    # Tueroeffnung: dunkles Nebenzimmer
+    # Tueroeffnung: helles Nebenzimmer (Kontrast zur dunklen Figur)
     ox0, ox1 = DOOR_CX - DOOR_HALF_OPENING, DOOR_CX + DOOR_HALF_OPENING
     d.rectangle([ox0, DOOR_TOP, ox1, FLOOR_Y], fill=BACKROOM[1])
-    dither_rect(d, (ox0, DOOR_TOP, ox1 + 1, DOOR_TOP + 30), BACKROOM[0])
-    d.rectangle([ox0, FLOOR_Y - 8, ox1, FLOOR_Y], fill=BACKROOM[2])
-    # Tuerschwelle
-    d.rectangle([ox0 - JAMB_W, FLOOR_Y, ox1 + JAMB_W, FLOOR_Y + 2], fill=WOOD[1], outline=OUTLINE)
+    dither_rect(d, (ox0, DOOR_TOP, ox1 + 1, DOOR_TOP + 12), BACKROOM[0])
+    d.rectangle([ox0, FLOOR_Y - 6, ox1, FLOOR_Y], fill=BACKROOM[0])
+    d.rectangle([ox0 - JAMB_W, FLOOR_Y, ox1 + JAMB_W, FLOOR_Y + 1], fill=WOOD[1], outline=OUTLINE)
 
-    # Leichte Vignette in den Ecken (Licht konzentriert sich auf die Tuer)
+    # Vignette an den Bildraendern
     for y in range(BASE_H):
-        for x in list(range(0, 18)) + list(range(BASE_W - 18, BASE_W)):
+        for x in list(range(0, 14)) + list(range(BASE_W - 14, BASE_W)):
             edge = min(x, BASE_W - 1 - x)
-            if (x + y) % 2 == 0 and edge < 18 - (y % 3) * 4:
+            if (x + y) % 2 == 0 and edge < 14 - (y % 3) * 3:
                 r, g, b = img.getpixel((x, y))
                 img.putpixel((x, y), (int(r * 0.8), int(g * 0.8), int(b * 0.85)))
     return img
 
 
 def draw_door_frame(d: ImageDraw.ImageDraw, shake_x: int) -> None:
-    """Pfosten + Sturz. Wird pro Frame gezeichnet, weil er UEBER dem Becken liegt."""
+    """Pfosten + Sturz; pro Frame gezeichnet, weil sie UEBER dem Becken liegen."""
     for side in (-1, 1):
-        inner = DOOR_CX + side * DOOR_HALF_OPENING
-        x0, x1 = sorted((inner, inner + side * JAMB_W))
+        inner = DOOR_CX + side * (DOOR_HALF_OPENING + 1)
+        x0, x1 = sorted((inner, inner + side * (JAMB_W - 1)))
         x0 += shake_x
         x1 += shake_x
         d.rectangle([x0, DOOR_TOP - LINTEL_H, x1, FLOOR_Y], fill=WOOD[1], outline=OUTLINE)
-        d.line([x0 + 2, DOOR_TOP, x0 + 2, FLOOR_Y - 2], fill=WOOD[2])
-        d.line([x1 - 2, DOOR_TOP, x1 - 2, FLOOR_Y - 2], fill=WOOD[0])
-        for y in range(DOOR_TOP + 9, FLOOR_Y, 17):  # Holzmaserung
-            d.point((x0 + 4, y), fill=WOOD[0])
-            d.point((x0 + 4, y + 1), fill=WOOD[0])
-    lx0 = DOOR_CX - DOOR_HALF_OPENING - JAMB_W - 3
-    lx1 = DOOR_CX + DOOR_HALF_OPENING + JAMB_W + 3
-    d.rectangle([lx0, DOOR_TOP - LINTEL_H - 2, lx1, DOOR_TOP], fill=WOOD[1], outline=OUTLINE)
-    d.line([lx0 + 1, DOOR_TOP - LINTEL_H - 1, lx1 - 1, DOOR_TOP - LINTEL_H - 1], fill=WOOD[2])
-    d.line([lx0 + 1, DOOR_TOP - 1, lx1 - 1, DOOR_TOP - 1], fill=WOOD[0])
+        d.line([x0 + 1, DOOR_TOP, x0 + 1, FLOOR_Y - 1], fill=WOOD[2])
+        for y in range(DOOR_TOP + 7, FLOOR_Y, 13):  # Holzmaserung
+            d.point((x0 + 2, y), fill=WOOD[0])
+            d.point((x0 + 2, y + 1), fill=WOOD[0])
+    lx0 = DOOR_CX - DOOR_HALF_OPENING - JAMB_W - 2
+    lx1 = DOOR_CX + DOOR_HALF_OPENING + JAMB_W + 2
+    d.rectangle([lx0, DOOR_TOP - LINTEL_H - 1, lx1, DOOR_TOP], fill=WOOD[1], outline=OUTLINE)
+    d.line([lx0 + 1, DOOR_TOP - LINTEL_H, lx1 - 1, DOOR_TOP - LINTEL_H], fill=WOOD[2])
+
+
+# =============================================================================
+# Sprite-Teile und pixelgenaue Verformung
+# =============================================================================
+class Figure:
+    """Haelt die zerlegten Sprite-Teile und setzt sie pro Frame verformt zusammen."""
+
+    def __init__(self, path: Path):
+        if not path.exists():
+            sys.exit(f"Fehler: Sprite {path} fehlt. Erst extract_sprite.py ausfuehren (siehe README).")
+        self.sprite = Image.open(path).convert("RGBA")
+        self.h = self.sprite.height
+
+    def part(self, rows) -> Image.Image:
+        y0, y1 = rows
+        return self.sprite.crop((0, y0, self.sprite.width, y1 + 1))
+
+    @staticmethod
+    def deform(part: Image.Image, row_offset: int, dx_top: float, dx_bottom: float,
+               sx_of_row) -> Image.Image:
+        """Verformt ein Teil zeilenweise (Nearest-Neighbor, keine Zwischenfarben).
+
+        dx_top/dx_bottom: horizontale Verschiebung oben/unten (dazwischen linear => Scherung)
+        sx_of_row(sprite_row) -> horizontaler Skalierungsfaktor um SPRITE_PIVOT_X
+        Ergebnis hat einen Rand von PAD Pixeln links/rechts.
+        """
+        pad = 16
+        w, h = part.size
+        out = Image.new("RGBA", (w + 2 * pad, h), (0, 0, 0, 0))
+        src = part.load()
+        dst = out.load()
+        for y in range(h):
+            v = y / max(1, h - 1)
+            dx = lerp(dx_top, dx_bottom, v)
+            sx = sx_of_row(row_offset + y)
+            for X in range(w + 2 * pad):
+                # inverse Abbildung: Zielspalte -> Quellspalte
+                xs = (X - pad - dx - SPRITE_PIVOT_X) / sx + SPRITE_PIVOT_X
+                xi = math.floor(xs + 0.5)
+                if 0 <= xi < w:
+                    px = src[xi, y]
+                    if px[3]:
+                        dst[X, y] = px
+        return out
+
+
+def hip_profile(widen: float):
+    """Liefert sx(row): weiche Beule um HIP_BULGE_ROW mit Maximalfaktor `widen`."""
+    y0, y1 = PART_HIPS
+    half = max(HIP_BULGE_ROW - y0, y1 - HIP_BULGE_ROW) + 1
+
+    def sx(row: int) -> float:
+        k = max(0.0, 1 - abs(row - HIP_BULGE_ROW) / half)
+        return 1 + (widen - 1) * math.sin(k * math.pi / 2)
+    return sx
 
 
 # =============================================================================
@@ -305,240 +311,72 @@ def draw_door_frame(d: ImageDraw.ImageDraw, shake_x: int) -> None:
 # =============================================================================
 @dataclass
 class Pose:
-    tx: float = 0.0            # seitliche Verschiebung des Oberkoerpers
-    ty: float = 0.0            # vertikale Verschiebung des Oberkoerpers (Atmen/Zusammensacken)
-    forward: float = 0.0       # Fortschritt "durch die Tuer" (Richtung Kamera)
-    hip_sq: float = 1.0        # Hueftbreiten-Faktor (<1 gequetscht, >1 ausgebeult)
-    lh: tuple = (-20.0, 102.0) # linke Hand (relativ zu DOOR_CX, absolut y)
-    rh: tuple = (20.0, 102.0)  # rechte Hand
+    tx_top: float = 0.0        # seitliche Verschiebung des Oberkoerpers an den Schultern
+    ty: float = 0.0            # vertikale Verschiebung von Oberkoerper/Kopf
+    forward: float = 0.0       # Fortschritt "durch die Tuer" Richtung Kamera
+    hip_scale: float = 1.0     # zusaetzlicher Faktor auf die Beckenbreite (<1 gequetscht)
     head_dx: float = 0.0
-    head_tilt: float = 0.0     # vertikaler Versatz des Kopfes
-    eyes: str = "open"         # open | determined | squint | wide | half
-    mouth: str = "frown"       # frown | grit | o | pant_open | pant_closed | flat
-    blush: bool = False
-    shake: int = 0             # Zitteramplitude in Pixeln
+    head_dy: float = 0.0
+    shake: int = 0             # Zitteramplitude (Pixel)
     bubble: str | None = None  # "!", "?", "~" oder None
     squeeze_marks: bool = False
     boing: float = 0.0         # Staerke der Feder-Bewegungslinien
-    ponytail: float = 0.0      # Schwung des Pferdeschwanzes
-
-
-HANDS_ON_HIPS = ((-21.0, 103.0), (21.0, 103.0))
-HANDS_ON_JAMBS = ((-27.0, 92.0), (27.0, 92.0))
-HANDS_HANGING = ((-23.0, 108.0), (23.0, 108.0))
-
-
-def lerp2(a, b, u):
-    return (lerp(a[0], b[0], u), lerp(a[1], b[1], u))
+    visor_glint: bool = False  # Lichtreflex auf dem Visier
 
 
 def pose_at(phase: str, u: float, t: float, amp: float) -> Pose:
-    """Liefert die Pose fuer Phase `phase` bei lokalem Fortschritt u in [0,1].
+    """Pose fuer `phase` bei lokalem Fortschritt u in [0,1].
 
-    Alle Phasen sind so gebaut, dass Anfangs- und Endposen nahtlos aneinander passen.
-    `t` ist die globale Zeit in Sekunden (fuer Atmen/Blinzeln), `amp` skaliert Bewegungen.
+    Anfangs-/Endposen der Phasen passen nahtlos aneinander. `t` = globale Zeit (s),
+    `amp` skaliert alle Bewegungen.
     """
     breathe = math.sin(t * 2 * math.pi * 1.2)
 
     if phase == "idle":
-        # Verdutzt feststecken: Haende in die Hueften, Kopf schaut links/rechts.
-        look = math.sin(u * 2 * math.pi) * 2
-        return Pose(ty=round(breathe * 0.6), lh=HANDS_ON_HIPS[0], rh=HANDS_ON_HIPS[1],
-                    head_dx=look, eyes="open", mouth="frown",
-                    bubble="?" if u > 0.45 else None)
+        # Steckt fest, schaut nach links/rechts, Fragezeichen erscheint
+        look = round(math.sin(u * 2 * math.pi) * 1.5)
+        return Pose(ty=round(breathe * 0.5), head_dx=look, bubble="?" if u > 0.45 else None)
 
     if phase == "grip":
-        # Haende wandern zu den Pfosten, Blick wird entschlossen.
+        # Ansetzen: lehnt sich kurz zurueck (nach oben gestreckt), holt Schwung
         e = ease_in_out(u)
-        return Pose(ty=-e * 1, lh=lerp2(HANDS_ON_HIPS[0], HANDS_ON_JAMBS[0], e),
-                    rh=lerp2(HANDS_ON_HIPS[1], HANDS_ON_JAMBS[1], e),
-                    eyes="determined", mouth="flat" if u < 0.5 else "grit")
+        return Pose(ty=-round(e * 2 * amp), head_dy=-round(e * 1))
 
     if phase == "strain":
-        # Ziehen & Wackeln: Oberkoerper pendelt seitlich, Haende stemmen sich gegen
-        # die Pfosten (leicht ruckelnd), Hueften pulsieren minimal.
+        # Ziehen & Wackeln: Oberkoerper pendelt (Scherung), Pumpen hoch/runter,
+        # Becken pulsiert leicht, alles zittert
         w = math.sin(u * 2 * math.pi * WIGGLE_CYCLES)
-        push = math.sin(u * 2 * math.pi * WIGGLE_CYCLES * 2)
-        ramp_in = min(1.0, u * 4)  # Wackeln faengt sanft an
-        jitter = 1 if int(t * 24) % 2 else 0
-        return Pose(tx=w * WIGGLE_PX * amp * ramp_in, ty=-1 + push * 0.8 * amp,
-                    hip_sq=1 + 0.03 * push * amp,
-                    lh=(HANDS_ON_JAMBS[0][0], HANDS_ON_JAMBS[0][1] + jitter),
-                    rh=(HANDS_ON_JAMBS[1][0], HANDS_ON_JAMBS[1][1] - jitter),
-                    head_dx=w * 1.5 * amp * ramp_in, head_tilt=1,
-                    eyes="squint", mouth="grit", blush=True, shake=SHAKE_PX,
-                    squeeze_marks=True, ponytail=-w * ramp_in)
+        pump = math.sin(u * 2 * math.pi * WIGGLE_CYCLES * 2)
+        ramp_in = min(1.0, u * 4)
+        return Pose(tx_top=w * WIGGLE_PX * amp * ramp_in,
+                    ty=-2 * amp + round(pump * 1 * amp),
+                    hip_scale=1 + 0.03 * pump * amp,
+                    head_dx=w * 1.0 * amp * ramp_in, head_dy=-1,
+                    shake=SHAKE_PX, squeeze_marks=True)
 
     if phase == "slip":
-        # Ruckartiges Vorrutschen: schneller Ease-Out, Hueften quetschen sich zusammen.
+        # Ruck nach vorne: schneller Ease-Out, Becken quetscht sich zusammen
         e = ease_out(u)
-        return Pose(ty=-1, forward=e * SLIP_PX * amp, hip_sq=1 - HIP_SQUEEZE * e,
-                    lh=HANDS_ON_JAMBS[0], rh=HANDS_ON_JAMBS[1],
-                    eyes="wide", mouth="o", blush=True, bubble="!", squeeze_marks=True)
+        return Pose(ty=-2 * amp * (1 - e), forward=e * SLIP_PX * amp,
+                    hip_scale=1 - HIP_SQUEEZE * e, head_dy=-1 * (1 - e),
+                    bubble="!", squeeze_marks=True, visor_glint=True)
 
     if phase == "snap":
-        # Zurueckfedern: gedaempfte Schwingung (Feder) zurueck auf 0 mit Ueberschwingen.
+        # Zurueckfedern: gedaempfte Feder mit Ueberschwingen, Becken beult aus
         spring = math.exp(-4.5 * u) * math.cos(3 * math.pi * u)
-        return Pose(ty=-1 + (1 - spring) * 1, forward=SLIP_PX * amp * spring,
-                    hip_sq=1 - HIP_SQUEEZE * spring,
-                    lh=HANDS_ON_JAMBS[0], rh=HANDS_ON_JAMBS[1],
-                    tx=math.sin(u * 14) * math.exp(-4 * u) * 2 * amp,
-                    eyes="squint", mouth="o" if u < 0.3 else "grit", blush=True,
-                    boing=math.exp(-3 * u), ponytail=spring * 2)
+        wob = math.sin(u * 14) * math.exp(-4 * u)
+        return Pose(forward=SLIP_PX * amp * spring,
+                    hip_scale=1 - HIP_SQUEEZE * max(0, spring) + HIP_BOUNCE * max(0, -spring) * 3,
+                    tx_top=wob * 2 * amp, head_dx=wob * 1.5 * amp,
+                    boing=math.exp(-3 * u))
 
     if phase == "exhausted":
-        # Erschoepft: Haende sinken herab, Oberkoerper sackt zusammen, Schnaufen.
+        # Erschoepft: sackt zusammen, Kopf haengt, schweres Atmen
         e = ease_in_out(min(1.0, u / 0.4))
-        pant = int(t * 6) % 2 == 0
-        return Pose(ty=lerp(0, 2, e) + breathe * 0.5,
-                    lh=lerp2(HANDS_ON_JAMBS[0], HANDS_HANGING[0], e),
-                    rh=lerp2(HANDS_ON_JAMBS[1], HANDS_HANGING[1], e),
-                    head_dx=0, head_tilt=lerp(0, 2, e),
-                    eyes="half", mouth="pant_open" if pant else "pant_closed", blush=True,
+        return Pose(ty=round(lerp(0, 2, e) + breathe * 0.6), head_dy=round(lerp(0, 1, e)),
                     bubble="~" if u > 0.35 else None)
 
     raise ValueError(f"unbekannte Phase: {phase}")
-
-
-# =============================================================================
-# Figur zeichnen
-# =============================================================================
-def draw_arm(d, shoulder, hand, side: int) -> None:
-    """Zweigliedriger Arm; der Ellbogen knickt nach aussen ab (side = -1 links, +1 rechts)."""
-    mx, my = (shoulder[0] + hand[0]) / 2, (shoulder[1] + hand[1]) / 2
-    dx, dy = hand[0] - shoulder[0], hand[1] - shoulder[1]
-    length = math.hypot(dx, dy) or 1
-    bend = max(0.0, 14 - length) * 0.6 + 2      # kurzer Abstand -> staerker gebeugt
-    nx, ny = -dy / length, dx / length           # Normale
-    if nx * side < 0:
-        nx, ny = -nx, -ny
-    elbow = (mx + nx * bend, my + ny * bend)
-    thick_segment(d, shoulder, elbow, ARM_W, SKIN[1])
-    thick_segment(d, elbow, hand, ARM_W, SKIN[1])
-    shaded_oval(d, hand[0], hand[1], HAND_R, HAND_R, SKIN)
-
-
-def draw_eyes(d, hx: int, hy: int, state: str) -> None:
-    for side in (-1, 1):
-        ex, ey = hx + side * 4, hy + 1
-        if state in ("open", "determined"):
-            d.rectangle([ex - 1, ey - 2, ex + 1, ey + 1], fill=WHITE)
-            d.rectangle([ex - (side < 0), ey - 1, ex + (side > 0), ey + 1], fill=EYE)
-            if state == "determined":  # schraege Augenbrauen
-                d.line([ex - 2 * side, ey - 5, ex + 2 * side, ey - 3], fill=OUTLINE)
-            else:
-                d.line([ex - 1, ey - 4, ex + 1, ey - 4], fill=HAIR[0])
-        elif state == "squint":  # > <
-            d.line([ex - 2 * side, ey - 2, ex + 1 * side, ey], fill=OUTLINE)
-            d.line([ex + 1 * side, ey, ex - 2 * side, ey + 2], fill=OUTLINE)
-        elif state == "wide":
-            d.rectangle([ex - 1, ey - 3, ex + 1, ey + 1], fill=WHITE, outline=OUTLINE)
-            d.point((ex, ey - 1), fill=EYE)
-        elif state == "half":
-            d.line([ex - 2, ey - 1, ex + 2, ey - 1], fill=OUTLINE)
-            d.rectangle([ex - 1, ey, ex + 1, ey + 1], fill=EYE)
-
-
-def draw_mouth(d, hx: int, hy: int, state: str) -> None:
-    my = hy + 6
-    if state == "frown":
-        d.line([hx - 2, my + 1, hx + 2, my + 1], fill=OUTLINE)
-        d.point((hx - 3, my + 2), fill=OUTLINE)
-        d.point((hx + 3, my + 2), fill=OUTLINE)
-    elif state == "flat":
-        d.line([hx - 2, my, hx + 2, my], fill=OUTLINE)
-    elif state == "grit":  # zusammengebissene Zaehne
-        d.rectangle([hx - 3, my - 1, hx + 3, my + 2], fill=WHITE, outline=OUTLINE)
-        d.line([hx - 2, my + 0, hx + 2, my + 0], fill=(200, 190, 190))
-    elif state == "o":
-        d.ellipse([hx - 2, my - 1, hx + 2, my + 3], fill=OUTLINE)
-        d.point((hx, my + 2), fill=(170, 70, 80))
-    elif state == "pant_open":
-        d.ellipse([hx - 2, my, hx + 2, my + 3], fill=OUTLINE)
-    elif state == "pant_closed":
-        d.line([hx - 2, my + 1, hx + 2, my + 1], fill=OUTLINE)
-
-
-def draw_character(d: ImageDraw.ImageDraw, p: Pose, shake_x: int) -> tuple[int, int]:
-    """Zeichnet die Figur in fester Reihenfolge (hinten -> vorne).
-
-    Gibt die Kopfposition zurueck (fuer Effekte). Die Tuerpfosten werden zwischen
-    Becken und Oberkoerper gezeichnet, damit das Becken eingeklemmt wirkt.
-    """
-    cx = DOOR_CX + shake_x
-    fwd = p.forward                    # Vorrutschen: Figur kommt ein Stueck Richtung Kamera
-    by = fwd * 0.75                    # ... was in der Frontansicht als leichtes Absenken wirkt
-
-    # --- Beine (stehen im Nebenzimmer, daher dunklere Rampe) --------------------
-    leg_ramp = (PANTS[0], PANTS[0], PANTS[1])
-    for side in (-1, 1):
-        shaded_oval(d, cx + side * 11, 129 + by * 0.5, 8, 10, leg_ramp)
-        shaded_oval(d, cx + side * 10, 141 + by * 0.3, 5, 7, leg_ramp)
-        shaded_oval(d, cx + side * 11, FLOOR_Y - 2, 6, 3, SHOES)
-
-    # --- Becken / Hueften (breiter als die Tueroeffnung) ----------------------
-    hip_rx = HIP_RX * p.hip_sq
-    hip_y = HIP_Y + by
-    shaded_oval(d, cx, hip_y, hip_rx, HIP_RY, PANTS)
-    d.line([cx, hip_y - 4, cx, hip_y + 6], fill=PANTS[0])          # Hosennaht
-    d.rectangle([cx - 14, hip_y - HIP_RY + 1, cx + 14, hip_y - HIP_RY + 3], fill=PANTS[0])  # Bund
-
-    return cx, by
-
-
-def draw_upper_body(d: ImageDraw.ImageDraw, p: Pose, cx: int, by: float) -> tuple[int, int]:
-    tx, ty = p.tx, p.ty + by
-
-    # Oberkoerper (Shirt) als eine zusammenhaengende Form:
-    # Taille, Rumpf und Brust (zwei Ovale, cartoonhaft, bekleidet)
-    shaded_blob(d, [
-        (cx + tx * 0.4, WAIST_Y + ty * 0.6 + by * 0.4, WAIST_RX, WAIST_RY),
-        (cx + tx * 0.8, TRUNK_Y + ty, TRUNK_RX, TRUNK_RY),
-        (cx + tx - CHEST_DX, CHEST_Y + ty, CHEST_RX, CHEST_RY),
-        (cx + tx + CHEST_DX, CHEST_Y + ty, CHEST_RX, CHEST_RY),
-    ], SHIRT)
-    # Stofffalte zwischen den Brust-Ovalen und Saum ueber dem Bund
-    fx = round(cx + tx)
-    d.line([fx, round(CHEST_Y + ty - 2), fx, round(CHEST_Y + ty + 5)], fill=SHIRT[0])
-    d.line([round(cx + tx * 0.4 - 8), round(WAIST_Y + ty * 0.6 + by * 0.4 + 5),
-            round(cx + tx * 0.4 + 8), round(WAIST_Y + ty * 0.6 + by * 0.4 + 5)], fill=SHIRT[0])
-    # Ausschnitt / Kragen
-    nx, ny = round(cx + tx), round(TRUNK_Y - TRUNK_RY + ty)
-    d.polygon([(nx - 4, ny + 1), (nx + 4, ny + 1), (nx, ny + 5)], fill=SKIN[1], outline=OUTLINE)
-
-    # Kopf-Position
-    hx = round(cx + tx * 1.2 + p.head_dx)
-    hy = round(HEAD_Y + ty + p.head_tilt)
-
-    # Hals
-    d.rectangle([nx - 2, hy + HEAD_RY - 3, nx + 2, ny + 2], fill=SKIN[0], outline=OUTLINE)
-
-    # Haare hinten + Pferdeschwanz (schwingt gegen die Bewegung)
-    shaded_oval(d, hx + 1, hy - 1, HEAD_RX + 2, HEAD_RY + 1, HAIR)
-    pt_x = hx + 12 + p.ponytail * 2 - tx * 0.5
-    shaded_oval(d, pt_x, hy + 4, 4, 8, HAIR)
-
-    # Gesicht
-    shaded_oval(d, hx, hy + 1, HEAD_RX, HEAD_RY - 1, SKIN)
-    # Pony
-    d.ellipse([hx - HEAD_RX - 1, hy - HEAD_RY, hx + HEAD_RX + 1, hy - 3], fill=OUTLINE)
-    d.ellipse([hx - HEAD_RX, hy - HEAD_RY + 1, hx + HEAD_RX, hy - 4], fill=HAIR[1])
-    d.line([hx - 5, hy - HEAD_RY + 3, hx - 2, hy - HEAD_RY + 3], fill=HAIR[2])
-    if p.blush:
-        for side in (-1, 1):
-            d.line([hx + side * 6 - 1, hy + 4, hx + side * 6 + 1, hy + 4], fill=BLUSH)
-    draw_eyes(d, hx, hy, p.eyes)
-    draw_mouth(d, hx, hy, p.mouth)
-
-    # Arme zuletzt (liegen vor Rumpf und Tuerpfosten)
-    for side, hand in ((-1, p.lh), (1, p.rh)):
-        shoulder = (cx + tx * 0.9 + side * SHOULDER_DX, SHOULDER_Y + ty)
-        hand_abs = (cx + hand[0], hand[1] + by)
-        # Haende in Hueft-Position folgen dem Oberkoerper ein wenig
-        if abs(hand[0]) < 25:
-            hand_abs = (hand_abs[0] + tx * 0.5, hand_abs[1] + ty * 0.3)
-        draw_arm(d, shoulder, hand_abs, side)
-    return hx, hy
 
 
 # =============================================================================
@@ -546,8 +384,8 @@ def draw_upper_body(d: ImageDraw.ImageDraw, p: Pose, cx: int, by: float) -> tupl
 # =============================================================================
 @dataclass
 class Particle:
-    born: int          # Frame der Entstehung
-    life: int          # Lebensdauer in Frames
+    born: int
+    life: int
     x: float
     y: float
     vx: float
@@ -555,85 +393,76 @@ class Particle:
     kind: str          # "sweat" | "dust"
 
 
-def build_particles(timeline, fps: int, rng: random.Random) -> list[Particle]:
-    """Erzeugt alle Partikel vorab (deterministisch durch den Seed)."""
+def build_particles(timeline, fps: int, rng: random.Random, head_y: int, hip_y: int) -> list[Particle]:
+    """Alle Partikel vorab erzeugen (deterministisch durch den Seed)."""
     parts: list[Particle] = []
+    s = 12 / fps  # Geschwindigkeiten unabhaengig von der FPS halten
     for phase, f0, f1 in timeline:
         if phase in ("strain", "exhausted"):
-            # Schweisstropfen fliegen vom Kopf weg
             step = max(1, fps // (5 if phase == "strain" else 3))
             for f in range(f0, f1, step):
                 side = rng.choice((-1, 1))
-                parts.append(Particle(f, max(4, fps // 2), side * rng.uniform(8, 11),
-                                      rng.uniform(-8, -3), side * rng.uniform(0.6, 1.2) * 12 / fps,
-                                      -rng.uniform(0.6, 1.1) * 12 / fps, "sweat"))
+                parts.append(Particle(f, max(4, fps // 2), side * rng.uniform(6, 9), head_y + rng.uniform(-6, 0),
+                                      side * rng.uniform(0.6, 1.2) * s, -rng.uniform(0.5, 1.0) * s, "sweat"))
         if phase == "slip":
-            # Staubwolken an den Kontaktstellen Huefte/Pfosten
             for side in (-1, 1):
                 for _ in range(5):
                     parts.append(Particle(f0 + rng.randint(0, 1), max(5, int(fps * 0.6)),
-                                          side * DOOR_HALF_OPENING, HIP_Y + rng.uniform(-8, 8),
-                                          side * rng.uniform(0.6, 1.6) * 12 / fps,
-                                          rng.uniform(-0.5, 0.3) * 12 / fps, "dust"))
+                                          side * (DOOR_HALF_OPENING + JAMB_W), hip_y + rng.uniform(-5, 5),
+                                          side * rng.uniform(0.6, 1.6) * s, rng.uniform(-0.5, 0.3) * s, "dust"))
     return parts
 
 
-def draw_particles(d, parts, frame: int, head_xy) -> None:
-    hx, hy = head_xy
+def draw_particles(d, parts, frame: int, head_dx: float) -> None:
     for p in parts:
         age = frame - p.born
         if not 0 <= age < p.life:
             continue
         if p.kind == "sweat":
-            x = hx + p.x + p.vx * age
-            y = hy + p.y + p.vy * age + 0.25 * age * age * (12 / max(1, p.life)) * 0.3
-            x, y = round(x), round(y)
+            x = round(DOOR_CX + head_dx + p.x + p.vx * age)
+            y = round(p.y + p.vy * age + 0.12 * age * age)
             d.point((x, y - 1), fill=SWEAT)
-            d.rectangle([x - 1, y, x + 1, y + 1], fill=SWEAT)
-            d.point((x - 1, y + 1), fill=(110, 160, 220))
+            d.rectangle([x - 1, y, x, y + 1], fill=SWEAT)
         else:
-            r = max(1, round(3 - 2 * age / p.life))
+            r = max(0, round(2 - 2 * age / p.life))
             x = round(DOOR_CX + p.x + p.vx * age)
             y = round(p.y + p.vy * age)
             d.ellipse([x - r, y - r, x + r, y + r], fill=DUST)
 
 
-def draw_bubble(d, hx: int, hy: int, ch: str) -> None:
-    bx, by = hx + 12, hy - 20
-    w = 9 if ch != "~" else 11
-    d.rectangle([bx, by, bx + w, by + 9], fill=WHITE, outline=OUTLINE)
-    d.polygon([(bx + 1, by + 9), (bx + 4, by + 9), (bx, by + 12)], fill=WHITE, outline=OUTLINE)
-    d.line([bx + 1, by + 9, bx + 3, by + 9], fill=WHITE)
-    draw_glyph(d, bx + 3, by + 2, ch, OUTLINE)
+def draw_bubble(d, x: int, y: int, ch: str) -> None:
+    w = 8 if ch != "~" else 10
+    d.rectangle([x, y, x + w, y + 8], fill=WHITE, outline=OUTLINE)
+    d.polygon([(x + 1, y + 8), (x + 3, y + 8), (x, y + 11)], fill=WHITE, outline=OUTLINE)
+    d.line([x + 1, y + 8, x + 2, y + 8], fill=WHITE)
+    draw_glyph(d, x + 3 if ch != "~" else x + 3, y + 2, ch, OUTLINE)
 
 
-def draw_squeeze_marks(d, hip_rx: float, hip_y: float, frame: int) -> None:
-    """Kleine Spannungsstriche dort, wo die Hueften gegen die Pfosten druecken."""
+def draw_squeeze_marks(d, hip_y: int, half_w: int, frame: int) -> None:
+    """Spannungsstriche dort, wo das Becken seitlich gegen die Pfosten drueckt."""
     if frame % 2:
         return
     for side in (-1, 1):
-        x = DOOR_CX + side * (DOOR_HALF_OPENING + JAMB_W + 2)
-        for dy in (-5, 0, 5):
-            d.line([x, round(hip_y) + dy, x + side * 3, round(hip_y) + dy - 1], fill=WHITE)
+        x = DOOR_CX + side * (half_w + 2)
+        for dy in (-3, 1):
+            d.line([x, hip_y + dy, x + side * 2, hip_y + dy - 1], fill=WHITE)
 
 
-def draw_boing(d, strength: float, hip_y: float, frame: int) -> None:
-    """Federnde Bewegungslinien seitlich am Becken nach dem Zurueckschnappen."""
+def draw_boing(d, strength: float, hip_y: int, half_w: int, frame: int) -> None:
+    """Federnde Bewegungslinien am Becken nach dem Zurueckschnappen."""
     if strength < 0.15:
         return
-    n = 3 if strength > 0.5 else 2
     off = frame % 2
     for side in (-1, 1):
-        x0 = DOOR_CX + side * (DOOR_HALF_OPENING + JAMB_W + 3 + off)
-        for i in range(n):
-            y = round(hip_y) - 6 + i * 6
-            d.line([x0, y, x0 + side * (4 + 2 * i), y], fill=OUTLINE)
+        x0 = DOOR_CX + side * (half_w + 2 + off)
+        for i in range(3 if strength > 0.5 else 2):
+            y = hip_y - 4 + i * 4
+            d.line([x0, y, x0 + side * (2 + i), y], fill=OUTLINE)
 
 
 def draw_floor_shadow(d, forward: float) -> None:
-    """Weicher (gedithert) Schatten vor der Tuer; waechst, wenn sie vorrutscht."""
-    rx = 30 + round(forward)
-    for y in range(FLOOR_Y + 1, FLOOR_Y + 5):
+    rx = 14 + round(forward)
+    for y in range(FLOOR_Y + 1, FLOOR_Y + 4):
         for x in range(DOOR_CX - rx, DOOR_CX + rx):
             if (x + y) % 2 == 0:
                 d.point((x, y), fill=FLOOR[0])
@@ -643,7 +472,6 @@ def draw_floor_shadow(d, forward: float) -> None:
 # Rendering-Pipeline
 # =============================================================================
 def build_timeline(fps: int, speed: float):
-    """Wandelt PHASES in Frame-Intervalle um: [(name, start_frame, end_frame), ...]."""
     out, f = [], 0
     for name, secs in PHASES:
         n = max(1, round(secs / speed * fps))
@@ -652,40 +480,71 @@ def build_timeline(fps: int, speed: float):
     return out
 
 
-def render_frames(fps: int, speed: float, amp: float, seed: int) -> list[Image.Image]:
+def render_frames(fps: int, speed: float, amp: float, seed: int, sprite: Path) -> list[Image.Image]:
     rng = random.Random(seed)
     bg = render_background()
+    fig = Figure(sprite)
+    top = FLOOR_Y - fig.h + 1                     # Sprite-Oberkante im Bild
+    left = round(DOOR_CX - SPRITE_PIVOT_X)        # Sprite-Spalte 0 im Bild
+    parts = {k: fig.part(r) for k, r in
+             (("legs", PART_LEGS), ("hips", PART_HIPS), ("torso", PART_TORSO), ("head", PART_HEAD))}
+    hip_y_img = top + HIP_BULGE_ROW
     timeline = build_timeline(fps, speed)
-    particles = build_particles(timeline, fps, rng)
+    particles = build_particles(timeline, fps, rng, top + 6, hip_y_img)
+    unit = lambda row: 1.0  # noqa: E731  (keine Skalierung)
     frames: list[Image.Image] = []
 
     for phase, f0, f1 in timeline:
         for f in range(f0, f1):
             u = (f - f0) / max(1, (f1 - f0 - 1))
-            t = f / fps
-            pose = pose_at(phase, u, t, amp)
-
+            p = pose_at(phase, u, f / fps, amp)
             img = bg.copy()
             d = ImageDraw.Draw(img)
-            shake_x = (1 if f % 2 else -1) * pose.shake if pose.shake else 0
+            shake = ((1 if f % 2 else -1) * p.shake) if p.shake else 0
+            by = round(p.forward * 0.5)       # Vorrutschen wirkt in Frontansicht als Absenken
 
-            draw_floor_shadow(d, pose.forward)
-            cx, by = draw_character(d, pose, shake_x)
-            draw_door_frame(d, shake_x)          # Pfosten UEBER dem Becken
-            hip_y = HIP_Y + by
-            if pose.squeeze_marks:
-                draw_squeeze_marks(d, HIP_RX * pose.hip_sq, hip_y, f)
-            draw_boing(d, pose.boing, hip_y, f)
-            hx, hy = draw_upper_body(d, pose, cx, by)
-            draw_particles(d, particles, f, (hx, hy))
-            if pose.bubble:
-                draw_bubble(d, hx, hy, pose.bubble)
+            def paste(name, rows, dy, dx_top, dx_bottom, sx):
+                layer = Figure.deform(parts[name], rows[0], dx_top, dx_bottom, sx)
+                img.paste(layer, (left - 16 + shake, top + rows[0] + round(dy)), layer)
+
+            draw_floor_shadow(d, p.forward)
+            # 1) Beine (im Nebenzimmer, bleiben fast stehen)
+            paste("legs", PART_LEGS, round(by * 0.5), 0, 0, unit)
+            # 2) Becken: verbreitert + gequetscht/ausgebeult
+            hips_sx = hip_profile(1 + (HIP_WIDEN - 1) * p.hip_scale + (p.hip_scale - 1))
+            paste("hips", PART_HIPS, by, 0, 0, hips_sx)
+            # 3) Tuerrahmen UEBER dem Becken => eingeklemmt
+            draw_door_frame(d, shake)
+            # 4) Oberkoerper: Scherung (oben tx_top, unten fast fest)
+            tx = p.tx_top
+            # Der Oberkoerper darf nur nach UNTEN (ueber das Becken) wandern, sonst wuerde
+            # unter ihm der Jackensaum des Becken-Teils doppelt sichtbar. Hochziehen/Strecken
+            # uebernimmt der Kopf (p.ty negativ => nur Kopf hebt sich, Hals wird sichtbar).
+            torso_dy = by + max(0, p.ty)
+            paste("torso", PART_TORSO, torso_dy, round(tx), round(tx * 0.2), unit)
+            # 5) Kopf folgt den Schultern
+            hx = round(tx * 1.1 + p.head_dx)
+            head_dy = torso_dy + min(0, p.ty) * 0.5 + p.head_dy
+            paste("head", PART_HEAD, head_dy, hx, hx, unit)
+
+            # Effekte
+            half_w = round(hips_sx(HIP_BULGE_ROW) * SPRITE_PIVOT_X)
+            if p.squeeze_marks:
+                draw_squeeze_marks(d, hip_y_img + by, half_w, f)
+            draw_boing(d, p.boing, hip_y_img + by, half_w, f)
+            head_top = top + round(head_dy)
+            if p.visor_glint and f % 2 == 0:
+                gx, gy = left + hx + 9 + shake, head_top + 9
+                d.line([gx, gy, gx + 2, gy], fill=WHITE)
+            draw_particles(d, particles, f, hx)
+            if p.bubble:
+                draw_bubble(d, left + hx + 22, head_top - 8, p.bubble)
             frames.append(img)
     return frames
 
 
 def upscale(img: Image.Image, scale: int) -> Image.Image:
-    # NEAREST = harte Pixelkanten, kein Weichzeichnen.
+    # NEAREST = harte Pixelkanten, kein Weichzeichnen
     return img.resize((img.width * scale, img.height * scale), Image.NEAREST)
 
 
@@ -731,8 +590,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Rendert eine Pixel-Art-Slapstick-Animation (Figur steckt im Tuerrahmen fest).")
     ap.add_argument("-o", "--out-dir", type=Path, default=Path("out"), help="Ausgabeordner (Standard: out)")
     ap.add_argument("--name", default="doorway_stuck", help="Basisname der Ausgabedateien")
+    ap.add_argument("--sprite", type=Path, default=SPRITE_PATH, help="Sprite-PNG der Figur")
     ap.add_argument("--fps", type=int, default=12, help="Bildrate, empfohlen 12-15 (Standard: 12)")
-    ap.add_argument("--scale", type=int, default=4, help="Hochskalierung, 4 => 1280x720 (Standard: 4)")
+    ap.add_argument("--scale", type=int, default=5, help="Hochskalierung, 5 => 1280x720 (Standard: 5)")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="Tempo-Faktor: >1 schneller/kuerzer, <1 langsamer (Standard: 1.0)")
     ap.add_argument("--amplitude", type=float, default=1.0,
@@ -742,7 +602,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--crf", type=int, default=16, help="x264-Qualitaet (kleiner = besser, Standard: 16)")
     ap.add_argument("--no-mp4", action="store_true", help="Kein MP4 erzeugen")
     ap.add_argument("--gif", action="store_true", help="Zusaetzlich GIF exportieren")
-    ap.add_argument("--gif-scale", type=int, default=2, help="Skalierung des GIFs (Standard: 2)")
+    ap.add_argument("--gif-scale", type=int, default=3, help="Skalierung des GIFs (Standard: 3)")
     ap.add_argument("--sheet", action="store_true", help="Zusaetzlich Sprite-Sheet (PNG) exportieren")
     ap.add_argument("--sheet-cols", type=int, default=10, help="Spalten im Sprite-Sheet")
     ap.add_argument("--sheet-scale", type=int, default=1, help="Skalierung des Sprite-Sheets")
@@ -757,9 +617,8 @@ def main(argv=None) -> None:
     a = parse_args(argv)
     a.out_dir.mkdir(parents=True, exist_ok=True)
 
-    frames = render_frames(a.fps, a.speed, a.amplitude, a.seed)
-    dur = len(frames) / a.fps
-    print(f"{len(frames)} Frames gerendert ({dur:.2f} s @ {a.fps} FPS, "
+    frames = render_frames(a.fps, a.speed, a.amplitude, a.seed, a.sprite)
+    print(f"{len(frames)} Frames gerendert ({len(frames) / a.fps:.2f} s @ {a.fps} FPS, "
           f"{BASE_W}x{BASE_H} -> {BASE_W * a.scale}x{BASE_H * a.scale})")
 
     written = []
@@ -784,7 +643,7 @@ def main(argv=None) -> None:
     for p in written:
         print(f"  -> {p}")
     print("\nStart:  python doorway_stuck.py [--fps 15] [--gif] [--sheet]   (Hilfe: --help)")
-    print("Benoetigt: Python >= 3.9, pillow (pip install -r requirements.txt), ffmpeg im PATH")
+    print("Benoetigt: Python >= 3.9, pillow + numpy (pip install -r requirements.txt), ffmpeg im PATH")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 # Pixel-Doorway – Pixel-Art-Slapstick-Animation
 
-Python-Skript, das eine kurze Pixel-Art-Animation rendert: Eine Figur steckt mit den Hüften
-in einem schmalen Holztürrahmen fest, stemmt sich dagegen, ruckt ein Stück vor und federt zurück.
+Eine Pixel-Figur steckt mit dem Becken in einem schmalen Holztürrahmen fest, stemmt sich dagegen,
+wackelt, ruckt ein kleines Stück vor und federt wieder zurück.
 
-- Basisauflösung 320×180, Nearest-Neighbor-Upscaling (Standard ×4 → 1280×720)
+- Figur: eigenes Sprite (`assets/heroine.png`, 25×70 px), aus dem Referenzvideo extrahiert
+- Basisauflösung 256×144, Nearest-Neighbor-Upscaling ×5 → 1280×720
 - 12–15 FPS, ca. 4,8 s
 - Export: MP4 (ffmpeg), optional GIF, Sprite-Sheet, Einzelbilder
 - Deterministisch (`--seed`)
@@ -11,8 +12,8 @@ in einem schmalen Holztürrahmen fest, stemmt sich dagegen, ruckt ein Stück vor
 ## Abhängigkeiten
 
 - Python ≥ 3.9
-- Pillow: `pip install -r requirements.txt`
-- ffmpeg im `PATH` (nur für MP4), z. B. `brew install ffmpeg` / `sudo apt install ffmpeg`
+- `pip install -r requirements.txt` (Pillow, numpy)
+- ffmpeg im `PATH` (für MP4 und die Sprite-Extraktion), z. B. `brew install ffmpeg` / `sudo apt install ffmpeg`
 
 ## Benutzung
 
@@ -28,8 +29,9 @@ python doorway_stuck.py --help
 | Argument | Bedeutung | Standard |
 |---|---|---|
 | `-o, --out-dir` | Ausgabeordner | `out` |
+| `--sprite` | Sprite-PNG der Figur | `assets/heroine.png` |
 | `--fps` | Bildrate | 12 |
-| `--scale` | Hochskalierung (Nearest-Neighbor) | 4 |
+| `--scale` | Hochskalierung (Nearest-Neighbor) | 5 |
 | `--speed` | Tempo-Faktor aller Phasen | 1.0 |
 | `--amplitude` | Stärke von Wackeln/Vorrutschen | 1.0 |
 | `--seed` | Seed für Partikel | 7 |
@@ -37,13 +39,31 @@ python doorway_stuck.py --help
 | `--gif`, `--sheet`, `--frames-dir` | Zusatzexporte | aus |
 | `--no-mp4` | kein MP4 | – |
 
-## Anpassen
+## Sprite neu extrahieren
 
-Alle Stellschrauben stehen oben in `doorway_stuck.py`:
+`assets/heroine.png` ist eingecheckt. Neu erzeugen (oder eine andere Figur holen):
 
-1. **PALETTE** – Farbrampen (Schatten, Grundton, Licht)
-2. **LAYOUT** – Raum- und Türgeometrie
-3. **PROPORTIONS** – Körperproportionen
-4. **PHASES** – Ablauf/Dauer (`idle`, `grip`, `strain`, `slip`, `snap`, `exhausted`) und Amplituden
+```bash
+python extract_sprite.py --video referenz.mov -o assets/heroine.png
+# andere Stelle/Figur: --time 12.5 --box x0,y0,x1,y1 ; Reste entfernen: --erase x0,y0,x1,y1
+```
 
-Die Posen je Phase berechnet `pose_at()`.
+Das Skript sampelt das hochskalierte Video auf das Original-Pixelraster zurück
+(`--pixel 7.35`), stellt die Figur per Farbe frei, reduziert die Palette und setzt die
+gelben Akzentlinien auf eine klare Farbe (`--accent`).
+
+## Anpassen (`doorway_stuck.py`, Abschnitte oben in der Datei)
+
+1. **PALETTE** – Farben von Raum und Effekten
+2. **LAYOUT** – Auflösung, Boden, Türbreite (`DOOR_HALF_OPENING`), Pfostenbreite
+3. **SPRITE** – Zeilenbereiche der Körperteile, `HIP_WIDEN` (Beckenbreite), `HIP_BULGE_ROW`
+4. **PHASES** – Ablauf/Dauer (`idle`, `grip`, `strain`, `slip`, `snap`, `exhausted`) und
+   Amplituden (`WIGGLE_PX`, `SLIP_PX`, `HIP_SQUEEZE`, `HIP_BOUNCE`, `SHAKE_PX`)
+
+Die Posen je Phase berechnet `pose_at()`. Die Figur wird in Streifen (Kopf, Oberkörper,
+Becken, Beine) zerlegt und pixelgenau verschoben, geschert und horizontal gestaucht;
+die Türpfosten liegen zwischen Becken und Oberkörper, dadurch wirkt sie eingeklemmt.
+
+Hinweis: Das Sprite ist ein einzelnes Standbild. Die Arme sind darin nicht vom Körper
+getrennt und bewegen sich deshalb mit dem Oberkörper. Für eigenständige Armbewegungen
+(z. B. gegen den Rahmen stemmen) werden separate Arm-Sprites benötigt.
